@@ -1,0 +1,72 @@
+# Build tawala-core image on core/v2. Never tags as product tawala-api.
+# Multi-platform (linux/amd64, linux/arm64) on push when registry is configured.
+name: Core Image
+
+on:
+  push:
+    branches: [core/v2, "core/**"]
+  pull_request:
+    branches: [core/v2]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tags
+        id: meta
+        run: |
+          SHA="${GITHUB_SHA::12}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Guard — forbid product image name
+        run: |
+          echo "tawala-core:${{ steps.meta.outputs.sha }}" | grep -vq tawala-api
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (PR / no registry) — linux/amd64
+        if: github.event_name == 'pull_request' || vars.CORE_IMAGE_REGISTRY == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: |
+            tawala-core:${{ steps.meta.outputs.sha }}
+            tawala-core:core-v2
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Log in to Core registry
+        if: github.event_name == 'push' && vars.CORE_IMAGE_REGISTRY != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.CORE_IMAGE_REGISTRY }}
+          username: ${{ secrets.CORE_IMAGE_USERNAME }}
+          password: ${{ secrets.CORE_IMAGE_PASSWORD }}
+
+      - name: Build & push multi-platform
+        if: github.event_name == 'push' && vars.CORE_IMAGE_REGISTRY != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ vars.CORE_IMAGE_REGISTRY }}/tawala-core:${{ steps.meta.outputs.sha }}
+            ${{ vars.CORE_IMAGE_REGISTRY }}/tawala-core:core-v2
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

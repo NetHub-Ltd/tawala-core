@@ -1,0 +1,29 @@
+# Fails any PR that targets main or dev when the head branch is under core/**
+name: Block core merge into product
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches:
+      - main
+      - dev
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject core/** → product branches
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          echo "Head branch: $HEAD_REF"
+          echo "Base branch: $BASE_REF"
+          case "$HEAD_REF" in
+            core|core/*)
+              echo "::error::MERGE_POLICY: PRs from core/** into main or dev are forbidden."
+              echo "See MERGE_POLICY.md on branch core/v2."
+              exit 1
+              ;;
+          esac
+          echo "OK: head branch is not under core/**"

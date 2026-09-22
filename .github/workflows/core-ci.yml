@@ -1,0 +1,88 @@
+# Core CI — runs on core/v2 only. Does not deploy product.
+# Pytest against real PostgreSQL is the sole quality gate.
+#
+# Postgres Docker's POSTGRES_USER is a superuser (bypasses RLS even with FORCE).
+# Migrations run as superuser; tests run as non-superuser `tawala_app` so RLS is real.
+name: Core CI
+
+on:
+  push:
+    branches: [core/v2, "core/**"]
+  pull_request:
+    branches: [core/v2]
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  test:
+    name: Pytest (PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: core_ci
+          POSTGRES_DB: tawala_core_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U core_ci -d tawala_core_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENVIRONMENT: test
+      LOG_LEVEL: DEBUG
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_PASSWORD: ""
+      DB_NAME: tawala_core_test
+      PGHOST: localhost
+      PGUSER: core_ci
+      PGDATABASE: tawala_core_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install package, dev tools, psql client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Migrate as superuser + create non-superuser app role
+        env:
+          DB_USER: core_ci
+        run: |
+          export DB_USER=core_ci
+          python -c "
+          from alembic.config import Config
+          from alembic import command
+          from app.core_platform.shared.settings import clear_settings_cache, get_settings
+          clear_settings_cache()
+          cfg = Config('alembic.ini')
+          cfg.set_main_option('sqlalchemy.url', get_settings().require_database_url_sync())
+          command.upgrade(cfg, 'head')
+          print('migrations ok')
+          "
+          # Non-superuser so FORCE RLS actually applies during pytest.
+          psql -v ON_ERROR_STOP=1 -c "CREATE ROLE tawala_app LOGIN PASSWORD '' NOSUPERUSER NOCREATEDB NOCREATEROLE;" || true
+          psql -v ON_ERROR_STOP=1 -c "GRANT CONNECT ON DATABASE tawala_core_test TO tawala_app;"
+          psql -v ON_ERROR_STOP=1 -c "GRANT USAGE ON SCHEMA public TO tawala_app;"
+          psql -v ON_ERROR_STOP=1 -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO tawala_app;"
+          psql -v ON_ERROR_STOP=1 -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO tawala_app;"
+          psql -v ON_ERROR_STOP=1 -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO tawala_app;"
+          psql -v ON_ERROR_STOP=1 -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO tawala_app;"
+          echo "tawala_app role ready"
+
+      - name: Pytest (real PostgreSQL, non-superuser)
+        env:
+          DB_USER: tawala_app
+        run: pytest -q
